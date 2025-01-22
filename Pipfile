@@ -1,0 +1,24 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+sqlalchemy = {extras = ["asyncio"], version = "*"}
+gradio = "*"
+openai = "*"
+anthropic = "*"
+python-dotenv = "*"
+asyncpg = "*"
+aiomysql = "*"
+aiosqlite = "*"
+pymssql = "*"
+
+[dev-packages]
+pytest = "*"
+black = "*"
+mypy = "*"
+pylint = "*"
+
+[requires]
+python_version = "3.10"
