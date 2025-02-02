@@ -1,6 +1,9 @@
-from typing import Optional, List, Tuple
-from .protocol import AIResponse, AIExpertProtocol
+from typing import Optional, List, Tuple, AsyncIterator, AsyncGenerator
+from .protocol import AIResponse, AIExpertProtocol, AIMessageDict
 import traceback
+import asyncio
+from openai.types.chat import ChatCompletionChunk
+from openai import AsyncOpenAI
 
 class OpenAIExpert(AIExpertProtocol):
     """OpenAI-based expert implementation."""
@@ -8,54 +11,65 @@ class OpenAIExpert(AIExpertProtocol):
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o",
-        system_prompt: Optional[str] = None
+        system_prompt: str,
+        model: str = "gpt-4o"
+        
     ):
-        import openai
-        openai.api_key = api_key
-        self.client = openai.OpenAI()
+        self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
         self.ddl: Optional[str] = None
-        self.system_prompt = system_prompt or """
-You are a database expert. You help users understand their database structure and write SQL queries.
-You have access to the database DDL which will be provided in the initialization.
-When users ask for queries, you should return both an explanation and the SQL query.
-"""
+        self.system_prompt = system_prompt
     
     def init(self, ddl: str) -> None:
         self.ddl = ddl
     
-    def ask(
+    async def stream(
         self,
         message: str,
-        history: List[Tuple[str, str]]
-    ) -> AIResponse:
+        history: List[AIMessageDict]
+    ) -> AsyncGenerator[str, None]:
+        """Stream AI expert's response."""
         if not self.ddl:
-            return AIResponse(
-                message="I haven't been initialized with database structure yet.",
-                error="Not initialized"
-            )
-        
+            yield "I haven't been initialized with database structure yet."
+            return
+
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "system", "content": f"Database DDL:\n{self.ddl}"}
+            {"role": "system", "content": f"#### Database DDL:\n{self.ddl}"}
         ]
         
-        for user_msg, assistant_msg in history:
-            messages.append({"role": "user", "content": user_msg})
-            messages.append({"role": "assistant", "content": assistant_msg})
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
         
         messages.append({"role": "user", "content": message})
-        
+
         try:
-            response = self.client.chat.completions.create(
+            stream = await self.client.chat.completions.create(
                 model=self.model,
-                messages=messages
+                messages=messages,
+                stream=True
             )
             
-            return AIResponse(
-                message=response.choices[0].message.content
-            )
+            async for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            traceback.print_exc()
+            print(f"Streaming error: {str(e)}")
+            yield f"\nError during streaming: {str(e)}"
+    
+    async def ask(
+        self,
+        message: str,
+        history: List[AIMessageDict]
+    ) -> AIResponse:
+        try:
+            full_response = ""
+            async for chunk in self.stream(message, history):
+                full_response += chunk
+                
+            return AIResponse(message=full_response)
             
         except Exception as e:
             traceback.print_exc()

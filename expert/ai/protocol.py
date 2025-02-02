@@ -1,6 +1,11 @@
-from typing import Optional, List, Dict, Any, Protocol, Tuple
+from typing import Optional, List, Dict, Any, Protocol, Tuple, AsyncIterator, AsyncGenerator, TypedDict
 from dataclasses import dataclass
 from abc import abstractmethod
+
+class AIMessageDict(TypedDict):
+    """Type definition for AI messages."""
+    role: str
+    content: str
 
 @dataclass
 class AIResponse:
@@ -23,10 +28,19 @@ class AIExpertProtocol(Protocol):
         pass
     
     @abstractmethod
-    def ask(
+    async def ask(
         self,
         message: str,
-        history: List[Tuple[str, str]]
+        history: List[AIMessageDict]
     ) -> AIResponse:
         """Ask AI expert a question."""
+        pass
+
+    @abstractmethod
+    async def stream(
+        self,
+        message: str,
+        history: List[AIMessageDict]
+    ) -> AsyncGenerator[str, None]:
+        """Stream AI expert's response."""
         pass 

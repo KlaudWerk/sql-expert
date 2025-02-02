@@ -2,6 +2,7 @@ import os
 from typing import Dict, List, Tuple, Optional
 from .factory import AIFactory
 from .protocol import AIExpertProtocol
+from .default_sys_prompts import DEFAULT_EXPERT_PROMPT, DEFAULT_REVIEWER_PROMPT, DEFAULT_USER_REVIEWER_PROMPT
 
 class AIConfig:
     """Class to manage AI configuration."""
@@ -81,30 +82,9 @@ class AIConfig:
     def get_default_system_prompt(role: str) -> str:
         """Get system prompt for specified role."""
         if role == 'expert':
-            return """
-You are a database expert. You help users understand their database structure and write SQL queries.
-You have access to the database DDL which will be provided in the initialization.
-When users ask for queries, you should:
-1. Explain the approach you'll take
-2. Write the SQL query if needed to fully answer the user's question
-3. Explain any performance considerations
-4. Point out any potential issues or edge cases
-SQL code must be returned in a valid SQL format.
-SQL code must be incuded in ```sql``` code block.
-"""
+            return DEFAULT_EXPERT_PROMPT
         elif role == 'reviewer':
-            return """
-You are a SQL code reviewer. Your job is to review the expert's responses and review the following:
-1. Query correctness
-2. SQL best practices
-3. Performance implications
-4. Security considerations
-5. Edge cases that might have been missed
-
-Be concise but thorough in your review.
-The expert's response will be provided in the initialization.
-The result of your review should be comprehensive and clear.
-"""
+            return DEFAULT_REVIEWER_PROMPT
         else:
             raise ValueError(f"Invalid role: {role}")
     

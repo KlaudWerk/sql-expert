@@ -1,12 +1,15 @@
 import gradio as gr
+from gradio import ChatMessage
 from expert.tool.connection import DatabaseConnection
 from expert.ddl import DatabaseType
 from expert.ai.config import AIConfig
-import os
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, AsyncGenerator, TypedDict
+from expert.ai.protocol import AIMessageDict
+from expert.ai.default_sys_prompts import DEFAULT_USER_REVIEWER_PROMPT
 from dotenv import load_dotenv
 import traceback
-import asyncio
+import json
+
 
 # Load environment variables
 load_dotenv()
@@ -61,50 +64,98 @@ async def execute_sql(query: str) -> gr.Dataframe:
         traceback.print_exc()
         return gr.Dataframe(value=[])
 
-def ask_question(message: str, history: List[Dict[str, str]]) -> Tuple[Dict[str, str], str]:
+async def ask_question(message: str, history: List[ChatMessage]) -> AsyncGenerator[List[ChatMessage], None]:
     """Handle chat messages."""
     if not AI_CONFIG.expert or not AI_CONFIG.reviewer:
-        return {
-            "role": "assistant",
-            "content": "Please select both Expert and Reviewer models first."
-        }, ""
+        history.append(ChatMessage(
+            role="assistant", content="Please select both Expert and Reviewer models first."
+        ))
+        yield history[-1:]
         
     try:
         # Convert history to tuples for AI protocol
-        history_tuples = [(msg["content"], msg["content"]) 
-                         for msg in history if msg["role"] in ["user", "assistant"]]
+        ai_history = [
+            AIMessageDict(role=msg.role, content=msg.content)
+            for msg in history if msg.role in ["user", "assistant"]
+        ]
         
-        # Get expert response
-        response = AI_CONFIG.expert.ask(message, history_tuples)
-        expert_message = response.message
+        # Stream expert response
+        expert_chunks = []
+        async for chunk in AI_CONFIG.expert.stream(message, ai_history):
+            expert_chunks.append(chunk)
+            # Update chat with partial response
+            history.append(ChatMessage(
+                role="assistant",
+                content=f"""Expert's response:\n{''.join(expert_chunks)}"""
+            ))
+            yield history[-1:]
         
-        # Get reviewer response
-        reviewer_response = AI_CONFIG.reviewer.ask(
-            f"Review this response for accuracy and completeness:\n{expert_message}",
-            []  # Empty history for reviewer
-        )
-        
+        expert_message = ''.join(expert_chunks)
         # Extract SQL query if present
         sql_query = AIConfig.extract_sql_query(expert_message)
-        
-        chat_response = {
-            "role": "assistant",
-            "content": f"""
-Expert's response:
-{expert_message}
+        if sql_query:
+            #
+            # Reviewer will review the SQL query
+            #
+            yield ChatMessage(
+                role="assistant",
+                content=f"Review the following SQL query:\n{sql_query}"
+            )
+            message = DEFAULT_USER_REVIEWER_PROMPT.format(sql_query=sql_query)
+            response = await AI_CONFIG.reviewer.ask(message=message, history=[])
+            try:
+                response_json = json.loads(response.message)
+            except Exception as e:
+                response_json = {
+                    "is_correct": False,
+                    "is_dangerous": True,
+                    "feedback": f"Error parsing JSON: {str(e)}"
+                }
+            if response_json["is_correct"]:
+                yield ChatMessage(
+                    role="assistant",
+                    content=f"Reviewer has approved the SQL query.\n{sql_query}"
+                )
+            else:
+                yield ChatMessage(
+                    role="assistant",
+                    content=f"Reviewer has rejected the SQL query.\n{sql_query}. Reason: {response_json['feedback']}"
+                )
 
-Reviewer's comment:
-{reviewer_response.message}"""
-        }
-        return chat_response, sql_query or ""
+
+
+
+
+
+        # Get reviewer response
+        reviewer_chunks = []
+        async for chunk in AI_CONFIG.reviewer.stream(
+            f"Review this response for accuracy and completeness:\n{expert_message}",
+            [AIMessageDict(role="user", content=expert_message)]  # Pass expert response as context
+        ):
+            reviewer_chunks.append(chunk)
+            # Update chat with expert response and partial reviewer response
+            history.append(ChatMessage(
+                role="assistant",
+                content=f"""Expert's response:\n{expert_message}\n\nReviewer's comment:\n{''.join(reviewer_chunks)}"""
+            ))
+            yield history[-1:]
+        
+        # Final response with complete expert and reviewer responses
+        history.append(ChatMessage(
+            role="assistant",
+            content=f"""Expert's response:\n{expert_message}\n\nReviewer's comment:\n{''.join(reviewer_chunks)}"""
+        ))
+        yield history[-1:]
         
     except Exception as e:
-        return {
-            "role": "assistant",
-            "content": f"Error: {str(e)}"
-        }, ""
+        history.append(ChatMessage(
+            role="assistant",
+            content=f"Error: {str(e)}"
+        ))
+        yield history[-1:]
 
-def connect(database: str, url: str, port: str, default_db: str, user: str, password: str) -> str:
+def connect(database: str, url: str, port: str, default_db: str, user: str, password: str) -> Tuple[str, str]:
     """Handle database connection."""
     print(f"Connecting to {database} at {url}:{port} default db [{default_db}] with user [{user}]")
     
@@ -112,20 +163,23 @@ def connect(database: str, url: str, port: str, default_db: str, user: str, pass
         if DB.is_connected:
             DB.disconnect()
             
-        # Convert database type
-        if database == "MySQL":
-            db_type = DatabaseType.MYSQL.value
-            default_db = default_db or "mydb"
-        elif database == "PostgreSQL":
-            db_type = DatabaseType.POSTGRESQL.value
-            default_db = default_db or "postgres"
-        elif database == "SQLite":
-            db_type = DatabaseType.SQLITE.value
-            default_db = default_db or "sqlite"
-        elif database == "MSSQL":
-            db_type = DatabaseType.MSSQL.value
-            default_db = default_db or "mssql"
-        
+        # Convert database type using match statement
+        match database:
+            case "MySQL":
+                db_type = DatabaseType.MYSQL.value
+                default_db = default_db or "mydb"
+            case "PostgreSQL":
+                db_type = DatabaseType.POSTGRESQL.value
+                default_db = default_db or "postgres"
+            case "SQLite":
+                db_type = DatabaseType.SQLITE.value
+                default_db = default_db or "sqlite"
+            case "MSSQL":
+                db_type = DatabaseType.MSSQL.value
+                default_db = default_db or "mssql"
+            case _:
+                raise ValueError(f"Unsupported database type: {database}")
+
         # Connect to database
         DB.connect(
             db_type=db_type,
@@ -142,24 +196,30 @@ def connect(database: str, url: str, port: str, default_db: str, user: str, pass
         if AI_CONFIG.reviewer:
             AI_CONFIG.reviewer.init(DB.get_ddl())
         
-        return f"Connected to {database} at {url}:{port} with user {user}\nDDL:\n{DB.db_info.ddl}"
+        gr.Info(f"Successfully connected to {database} at {url}:{port}")
+        status = f"Connected to {database} at {url}:{port}"
+        details = f"Connected to {database} at {url}:{port} with user {user}\nDDL:\n{DB.db_info.ddl}"
+        return status, details
         
     except Exception as e:
-        return f"Connection failed: {str(e)}"
+        gr.Warning(f"Connection failed: {str(e)}")
+        error_msg = f"Connection failed: {str(e)}"
+        return error_msg, error_msg
 
 def update_database_options(database: str) -> Tuple[str, int]:
     """Update database-specific options."""
     print(f"Updating database options for {database}")
-    if database == "MySQL":        
-        return "MySQL", 3306
-    elif database == "PostgreSQL":
-        return "PostgreSQL", 5432
-    elif database == "SQLite":
-        return "SQLite", 5432
-    elif database == "MSSQL":
-        return "MSSQL", 1433
-    else:
-        return "MySQL", 3306
+    match database:
+        case "MySQL":
+            return "MySQL", 3306
+        case "PostgreSQL":
+            return "PostgreSQL", 5432
+        case "SQLite":
+            return "SQLite", 5432
+        case "MSSQL":
+            return "MSSQL", 1433
+        case _:
+            return "MySQL", 3306  # Default case
 
 def on_model_change(
     model: str,
@@ -191,6 +251,10 @@ with gr.Blocks() as demo:
     with gr.Row():
         # Left panel
         with gr.Column():
+            connection_status = gr.Markdown(
+                value="Not connected to database",
+                label="Connection Status"
+            )
             # Add SQL execution section
             with gr.Accordion("SQL Execution", open=True):
                 sql_input = gr.Textbox(
@@ -220,7 +284,10 @@ with gr.Blocks() as demo:
                 type="messages",
                 chatbot=gr.Chatbot(
                     height=300,
-                    type="messages"
+                    type="messages",
+                    show_label=False,
+                    render_markdown=True,
+                    bubble_full_width=False
                 ),
                 textbox=gr.Textbox(
                     placeholder="Ask me about the database...",
@@ -228,7 +295,8 @@ with gr.Blocks() as demo:
                 ),
                 autofocus=False,
                 concurrency_limit=None,  # Allow multiple concurrent chats
-                additional_outputs=[sql_input]  # Pass SQL to input box
+                # additional_outputs=[sql_input],  # Pass SQL to input box
+                api_name="ask_question"  # Enable async
             )
 
         # Right panel
@@ -279,7 +347,7 @@ with gr.Blocks() as demo:
     connect_btn.click(
         fn=connect,
         inputs=[database, url, port, default_db, user, password],
-        outputs=output
+        outputs=[connection_status, output]
     )
     
     expert_model.change(

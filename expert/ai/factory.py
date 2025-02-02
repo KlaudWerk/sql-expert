@@ -10,8 +10,9 @@ class AIFactory:
     def create_expert(
         expert_type: str,
         api_key: str,
+        system_prompt: str,
         model: Optional[str] = None,
-        system_prompt: Optional[str] = None
+        
     ) -> AIExpertProtocol:
         """Create an AI expert instance."""
         if expert_type.lower() == "openai":

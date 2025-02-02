@@ -1,6 +1,7 @@
-from typing import Optional, List, Tuple, Dict
-from .protocol import AIResponse, AIExpertProtocol
+from typing import Optional, List, Tuple, Dict, AsyncIterator, AsyncGenerator
+from .protocol import AIResponse, AIExpertProtocol, AIMessageDict
 import traceback
+from anthropic import AsyncAnthropic
 
 class AnthropicExpert(AIExpertProtocol):
     """Anthropic-based expert implementation."""
@@ -8,35 +9,55 @@ class AnthropicExpert(AIExpertProtocol):
     def __init__(
         self,
         api_key: str,
+        system_prompt: str,
         model: str = "claude-3-sonnet-20240229",
-        system_prompt: Optional[str] = None
     ):
-        from anthropic import Anthropic
-        self.client = Anthropic(api_key=api_key)
+        self.client = AsyncAnthropic(api_key=api_key)
         self.model = model
         self.ddl: Optional[str] = None
-        self.system_prompt = system_prompt or """
-You are a database expert. You help users understand their database structure and write SQL queries.
-You have access to the database DDL which will be provided in the initialization.
-When users ask for queries, you should return both an explanation and the SQL query.
-"""
+        self.system_prompt = system_prompt 
     
     def init(self, ddl: str) -> None:
         self.ddl = ddl
     
-    async def _create_message(self, model: str, system: str, messages: List[Dict[str, str]]):
-        """Async helper for creating messages."""
-        return await self.client.messages.create(
-            model=model,
-            max_tokens=2048,
-            system=system,
-            messages=messages
-        )
-    
-    def ask(
+    async def stream(
         self,
         message: str,
-        history: List[Tuple[str, str]]
+        history: List[AIMessageDict]
+    ) -> AsyncGenerator[str, None]:
+        """Stream AI expert's response."""
+        if not self.ddl:
+            yield "I haven't been initialized with database structure yet."
+            return
+
+        messages = []
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        messages.append({"role": "user", "content": message})
+
+        try:
+            stream = await self.client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                system=f"{self.system_prompt}\nDatabase DDL:\n{self.ddl}",
+                messages=messages,
+                stream=True
+            )
+            
+            async for chunk in stream:
+                if chunk.content:
+                    yield chunk.content[0].text
+                    
+        except Exception as e:
+            traceback.print_exc()
+            print(f"Streaming error: {str(e)}")
+            yield f"\nError during streaming: {str(e)}"
+    
+    async def ask(
+        self,
+        message: str,
+        history: List[AIMessageDict]
     ) -> AIResponse:
         if not self.ddl:
             return AIResponse(
@@ -46,22 +67,17 @@ When users ask for queries, you should return both an explanation and the SQL qu
         
         messages = []
         
-        for user_msg, assistant_msg in history:
-            messages.extend([
-                {"role": "user", "content": user_msg},
-                {"role": "assistant", "content": assistant_msg}
-            ])
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
         
         try:
-            import asyncio
-            response = asyncio.run(self._create_message(
-                model=self.model,
-                system=f"{self.system_prompt}\nDatabase DDL:\n{self.ddl}",
-                messages=[*messages, {"role": "user", "content": message}]
-            ))
+            # Stream the response and concatenate chunks
+            full_response = ""
+            async for chunk in self.stream(message, history):
+                full_response += chunk
             
             return AIResponse(
-                message=response.content[0].text
+                message=full_response
             )           
 
         except Exception as e:
