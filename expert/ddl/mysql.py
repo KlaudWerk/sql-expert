@@ -76,16 +76,17 @@ class MySQLDDLGenerator(BaseDDLGenerator):
                 }
                 table_info['columns'].append(col_info)
             
-            # Get foreign key information
-            for fk in inspector.get_foreign_keys(table_name):
+            # Get foreign key information using reflection
+            table = sa.Table(table_name, sa.MetaData(), autoload_with=self.engine)
+            for fk in table.foreign_keys:
                 fk_info = {
-                    'name': fk.get('name', ''),
-                    'constrained_columns': fk['constrained_columns'],
-                    'referred_table': fk['referred_table'],
-                    'referred_columns': fk['referred_columns'],
+                    'name': fk.name,
+                    'constrained_columns': [fk.parent.name],  # Local column
+                    'referred_table': fk.column.table.name,   # Referenced table
+                    'referred_columns': [fk.column.name],     # Referenced column
                     'options': {
-                        'onupdate': fk.get('options', {}).get('onupdate'),
-                        'ondelete': fk.get('options', {}).get('ondelete')
+                        'onupdate': fk.onupdate,
+                        'ondelete': fk.ondelete
                     }
                 }
                 table_info['foreign_keys'].append(fk_info)

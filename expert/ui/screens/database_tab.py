@@ -6,6 +6,8 @@ from expert.tool.connection import DatabaseConnection
 import traceback
 import pyperclip
 from rich.text import Text
+from rich.table import Table
+from rich.box import SIMPLE
 from functools import partial
 
 from .widgets.database_panel import DatabaseConnectionPanel
@@ -123,59 +125,91 @@ class DatabaseTab(Container):
                 if connection.db_info.tables:
                     log.write("")  # Empty line for readability
                     log.write(Text("Tables:", style="green bold"))
+                    
                     for table_name, table_info in connection.db_info.tables.items():
                         log.write("")  # Empty line for better readability
                         log.write(Text(f"📋 {table_name}", style="green bold"))
                         
-                        # Show columns
+                        # Create a table for columns
                         if 'columns' in table_info:
+                            table = Table(
+                                title="Columns",
+                                show_header=True,
+                                header_style="green bold",
+                                title_style="green bold",
+                                box=SIMPLE,
+                                expand=True
+                            )
+                            
+                            # Add columns to the table
+                            table.add_column("", style="green", width=4)  # For icons
+                            table.add_column("Column", style="green")
+                            table.add_column("Type", style="green")
+                            table.add_column("Nullable", style="green", width=10)
+                            table.add_column("Default", style="green")
+                            
                             # First, find primary key columns
                             pk_columns = {col['name'] for col in table_info['columns'] if col.get('primary_key', False)}
                             
-                            # Find columns that are part of foreign keys (as source columns)
+                            # Find columns that are part of foreign keys
                             fk_source_columns = set()
                             for fk in table_info.get('foreign_keys', []):
                                 fk_source_columns.update(fk['constrained_columns'])
                             
-                            # Show columns with their details
+                            # Add rows to the table
                             for column in table_info['columns']:
-                                col_name = column['name']
-                                col_type = column['type']
-                                nullable = "NULL" if column.get('nullable', True) else "NOT NULL"
-                                
                                 # Add indicators
                                 indicators = []
-                                if col_name in pk_columns:
-                                    indicators.append("🔑")  # Primary key
-                                if col_name in fk_source_columns:
-                                    indicators.append("🔗")  # Foreign key
+                                if column['name'] in pk_columns:
+                                    indicators.append("🔑")
+                                if column['name'] in fk_source_columns:
+                                    indicators.append("🔗")
                                 if column.get('autoincrement', False):
-                                    indicators.append("🔄")  # Auto increment
+                                    indicators.append("🔄")
                                 
-                                # Format the column line
-                                indicator_str = " ".join(indicators)
-                                if indicator_str:
-                                    indicator_str += " "
-                                
-                                log.write(Text(f"  {indicator_str}{col_name}: {col_type} {nullable}", style="green"))
+                                table.add_row(
+                                    " ".join(indicators),
+                                    column['name'],
+                                    str(column['type']),
+                                    "NULL" if column.get('nullable', True) else "NOT NULL",
+                                    str(column.get('default', 'None'))
+                                )
+                            
+                            log.write(table)
                         
                         # Show foreign key relationships
                         if table_info.get('foreign_keys'):
-                            log.write(Text("  Foreign Key Relationships:", style="green bold"))
+                            log.write("")  # Empty line for readability
+                            fk_table = Table(
+                                title="Foreign Key Relationships",
+                                show_header=True,
+                                header_style="green bold",
+                                title_style="green bold",
+                                box=SIMPLE,
+                                expand=True
+                            )
+                            
+                            fk_table.add_column("Local Column", style="green")
+                            fk_table.add_column("→", style="green")
+                            fk_table.add_column("Referenced Table.Column", style="green")
+                            fk_table.add_column("Options", style="green dim")
+                            
                             for fk in table_info['foreign_keys']:
-                                ref_table = fk['referred_table']
                                 for local_col, ref_col in zip(fk['constrained_columns'], fk['referred_columns']):
-                                    log.write(Text(f"    🔗 {local_col} → {ref_table}.{ref_col}", style="green"))
-                                    
-                                # Show ON UPDATE/DELETE if present
-                                if 'options' in fk and fk['options']:
                                     options = []
-                                    if 'onupdate' in fk['options']:
+                                    if fk['options'].get('onupdate'):
                                         options.append(f"ON UPDATE {fk['options']['onupdate']}")
-                                    if 'ondelete' in fk['options']:
+                                    if fk['options'].get('ondelete'):
                                         options.append(f"ON DELETE {fk['options']['ondelete']}")
-                                    if options:
-                                        log.write(Text(f"      ({', '.join(options)})", style="green dim"))
+                                    
+                                    fk_table.add_row(
+                                        local_col,
+                                        "→",
+                                        f"{fk['referred_table']}.{ref_col}",
+                                        ", ".join(options)
+                                    )
+                            
+                            log.write(fk_table)
         
         except Exception as e:
             # Log error
