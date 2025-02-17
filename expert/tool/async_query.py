@@ -20,7 +20,8 @@ class AsyncQueryExecutor:
         if 'postgresql://' in connection_string:
             connection_string = connection_string.replace('postgresql://', 'postgresql+asyncpg://')
         elif 'mysql://' in connection_string:
-            connection_string = connection_string.replace('mysql://', 'mysql+aiomysql://')
+            # MySQL async connection string doesn't need a driver specification
+            connection_string = connection_string
         elif 'sqlite://' in connection_string:
             connection_string = connection_string.replace('sqlite://', 'sqlite+aiosqlite://')
             
@@ -146,3 +147,9 @@ class AsyncQueryExecutor:
             )
             
             return query_result, rows 
+
+    async def close(self) -> None:
+        """Close the engine and clean up resources."""
+        if self.engine:
+            await self.engine.dispose()
+            self.engine = None 

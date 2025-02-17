@@ -27,10 +27,18 @@ class QueryResult:
         return ", ".join(parts)
 
 class QueryExecutor:
-    """Class for executing SQL queries with streaming support."""
+    """Class for executing SQL queries."""
     
     def __init__(self, connection_string: str):
         """Initialize with database connection string."""
+        # Convert async connection string to sync version
+        if 'postgresql+asyncpg://' in connection_string:
+            connection_string = connection_string.replace('postgresql+asyncpg://', 'postgresql://')
+        elif 'mysql+aiomysql://' in connection_string:
+            connection_string = connection_string.replace('mysql+aiomysql://', 'mysql+pymysql://')
+        elif 'sqlite+aiosqlite://' in connection_string:
+            connection_string = connection_string.replace('sqlite+aiosqlite://', 'sqlite://')
+            
         self.engine = sa.create_engine(connection_string)
         
     @contextmanager

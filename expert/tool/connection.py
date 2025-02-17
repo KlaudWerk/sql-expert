@@ -2,7 +2,7 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from functools import lru_cache
 import sqlalchemy as sa
-from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from ..ddl import create_ddl_generator, DatabaseType
 from .query import QueryExecutor
 from .async_query import AsyncQueryExecutor
@@ -44,7 +44,7 @@ class DatabaseConnection:
             self._db_info: Optional[DatabaseInfo] = None
             self._sync_executor: Optional[QueryExecutor] = None
             self._async_executor: Optional[AsyncQueryExecutor] = None
-            self._engine: Optional[Engine] = None
+            self._engine: Optional[AsyncEngine] = None
     
     @property
     def is_connected(self) -> bool:
@@ -78,17 +78,18 @@ class DatabaseConnection:
         """Create database connection string."""
         if db_type == DatabaseType.POSTGRESQL.value:
             port = port or 5432
-            return f"postgresql://{username}:{password}@{host}:{port}/{database}"
+            return f"postgresql+asyncpg://{username}:{password}@{host}:{port}/{database}"
         elif db_type == DatabaseType.MYSQL.value:
             port = port or 3306
-            return f"mysql://{username}:{password}@{host}:{port}/{database}"
+            # Use aiomysql for async MySQL connections
+            return f"mysql+aiomysql://{username}:{password}@{host}:{port}/{database}"
         elif db_type == DatabaseType.MSSQL.value:
             port = port or 1433
             return f"mssql+pyodbc://{username}:{password}@{host}:{port}/{database}?driver=ODBC+Driver+17+for+SQL+Server"
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
     
-    def connect(
+    async def connect(
         self,
         db_type: str,
         host: str,
@@ -97,17 +98,10 @@ class DatabaseConnection:
         password: str,
         port: Optional[int] = None
     ) -> None:
-        """
-        Connect to database and extract DDL information.
+        """Connect to database and extract DDL information."""
+        # First disconnect if already connected
+        await self.disconnect()
         
-        Args:
-            db_type: Type of database (postgresql, mysql, mssql)
-            host: Database host
-            database: Database name
-            username: Database username
-            password: Database password
-            port: Database port (optional)
-        """
         # Create connection string
         connection_string = self._create_connection_string(
             db_type=db_type,
@@ -118,42 +112,61 @@ class DatabaseConnection:
             port=port
         )
         
-        # Create engine and test connection
-        self._engine = sa.create_engine(connection_string)
-        self._engine.connect()  # Test connection
+        # Create sync connection string for DDL generation
+        sync_connection_string = connection_string
+        if 'postgresql+asyncpg://' in connection_string:
+            sync_connection_string = connection_string.replace('postgresql+asyncpg://', 'postgresql://')
+        elif 'mysql+aiomysql://' in connection_string:
+            sync_connection_string = connection_string.replace('mysql+aiomysql://', 'mysql+pymysql://')
+        elif 'sqlite+aiosqlite://' in connection_string:
+            sync_connection_string = connection_string.replace('sqlite+aiosqlite://', 'sqlite://')
         
-        # Create executors
-        self._sync_executor = QueryExecutor(connection_string)
-        self._async_executor = AsyncQueryExecutor(connection_string)
-        
-        # Create DDL generator and extract DDL
-        ddl_generator = create_ddl_generator(connection_string)
-        ddl = ddl_generator.get_complete_ddl()
-        tables = ddl_generator.get_all_tables_ddl()
-        
-        # Store database information
-        self._db_info = DatabaseInfo(
-            host=host,
-            port=port or self._get_default_port(db_type),
-            database=database,
-            username=username,
-            password=password,
-            db_type=DatabaseType(db_type),
-            connection_string=connection_string,
-            ddl=ddl,
-            tables=tables
-        )
+        try:
+            # Create async engine and test connection
+            self._engine = create_async_engine(connection_string)
+            async with self._engine.connect() as conn:
+                await conn.execute(sa.text("SELECT 1"))
+            
+            # Create executors
+            self._sync_executor = QueryExecutor(sync_connection_string)
+            self._async_executor = AsyncQueryExecutor(connection_string)
+            
+            # Create DDL generator and extract DDL using sync connection
+            ddl_generator = create_ddl_generator(sync_connection_string)
+            ddl = ddl_generator.get_complete_ddl()
+            tables = ddl_generator.get_all_tables_ddl()
+            
+            # Store database information
+            self._db_info = DatabaseInfo(
+                host=host,
+                port=port or self._get_default_port(db_type),
+                database=database,
+                username=username,
+                password=password,
+                db_type=DatabaseType(db_type),
+                connection_string=connection_string,
+                ddl=ddl,
+                tables=tables
+            )
+        except Exception:
+            # Clean up on error
+            await self.disconnect()
+            raise
     
-    def disconnect(self) -> None:
+    async def disconnect(self) -> None:
         """Disconnect from database and clean up resources."""
         if self._engine:
-            self._engine.dispose()
+            await self._engine.dispose()
             self._engine = None
         
-        self._sync_executor = None
-        self._async_executor = None
+        if self._async_executor:
+            await self._async_executor.close()
+            self._async_executor = None
+        
+        if self._sync_executor:
+            self._sync_executor = None  # Just remove the reference
+        
         self._db_info = None
-        self._initialized = False
     
     def _get_default_port(self, db_type: str) -> int:
         """Get default port for database type."""

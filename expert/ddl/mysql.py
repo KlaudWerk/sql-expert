@@ -1,47 +1,35 @@
+"""MySQL DDL generator implementation."""
 import sqlalchemy as sa
-from typing import List, Dict
+from typing import List, Dict, Any
+from sqlalchemy import inspect
 from .base import BaseDDLGenerator
 
 class MySQLDDLGenerator(BaseDDLGenerator):
-    """MySQL-specific DDL generator."""
+    """MySQL specific DDL generator."""
+
     def get_table_ddl(self, table_name: str) -> str:
+        """Get DDL for a specific table."""
         table = sa.Table(table_name, self.metadata, autoload_with=self.engine)
         create_table = sa.schema.CreateTable(table)
-        
-        table_options = []
-        table_info = self.inspector.get_table_options(table_name)
-        if table_info:
-            if 'mysql_engine' in table_info:
-                table_options.append(f"ENGINE={table_info['mysql_engine']}")
-            if 'mysql_charset' in table_info:
-                table_options.append(f"CHARACTER SET {table_info['mysql_charset']}")
-            if 'mysql_collate' in table_info:
-                table_options.append(f"COLLATE {table_info['mysql_collate']}")
-        
-        ddl = str(create_table.compile(self.engine))
-        if table_options:
-            ddl = f"{ddl} {' '.join(table_options)}"
-        return ddl
+        return str(create_table.compile(self.engine))
 
     def get_indexes_ddl(self, table_name: str) -> List[str]:
+        """Get DDL for table indexes."""
         indexes = []
-        schema = self.get_schema_name(table_name)
-        
-        for index in self.inspector.get_indexes(table_name, schema=schema):
-            columns = index['column_names']
-            unique = "UNIQUE " if index['unique'] else ""
-            index_name = index['name']
-            index_type = index.get('mysql_type', 'BTREE')
+        for idx in self.inspector.get_indexes(table_name):
+            columns = idx['column_names']
+            unique = "UNIQUE " if idx['unique'] else ""
+            index_name = idx['name']
+            index_type = idx.get('mysql_type', 'BTREE')
             index_ddl = (f"CREATE {unique}INDEX {index_name} ON {table_name} "
                         f"({', '.join(columns)}) USING {index_type};")
             indexes.append(index_ddl)
         return indexes
 
     def get_foreign_keys_ddl(self, table_name: str) -> List[str]:
+        """Get DDL for table foreign keys."""
         foreign_keys = []
-        schema = self.get_schema_name(table_name)
-        
-        for fk in self.inspector.get_foreign_keys(table_name, schema=schema):
+        for fk in self.inspector.get_foreign_keys(table_name):
             constrained_cols = fk['constrained_columns']
             referred_cols = fk['referred_columns']
             referred_table = fk['referred_table']
@@ -60,22 +48,100 @@ class MySQLDDLGenerator(BaseDDLGenerator):
             foreign_keys.append(fk_ddl)
         return foreign_keys
 
+    def get_all_tables_ddl(self) -> Dict[str, Any]:
+        """Get DDL for all tables in the database."""
+        inspector = inspect(self.engine)
+        tables = {}
+        
+        for table_name in inspector.get_table_names():
+            table_info = {
+                'columns': [],
+                'foreign_keys': [],
+                'indexes': [],
+                'constraints': []
+            }
+            
+            # Get primary key columns first
+            pk_columns = set(inspector.get_pk_constraint(table_name)['constrained_columns'])
+            
+            # Get column information
+            for column in inspector.get_columns(table_name):
+                col_info = {
+                    'name': column['name'],
+                    'type': str(column['type']),
+                    'nullable': column['nullable'],
+                    'primary_key': column['name'] in pk_columns,  # Use the pk_columns set
+                    'default': str(column.get('default', 'None')),
+                    'autoincrement': column.get('autoincrement', False)
+                }
+                table_info['columns'].append(col_info)
+            
+            # Get foreign key information
+            for fk in inspector.get_foreign_keys(table_name):
+                fk_info = {
+                    'name': fk.get('name', ''),
+                    'constrained_columns': fk['constrained_columns'],
+                    'referred_table': fk['referred_table'],
+                    'referred_columns': fk['referred_columns'],
+                    'options': {
+                        'onupdate': fk.get('options', {}).get('onupdate'),
+                        'ondelete': fk.get('options', {}).get('ondelete')
+                    }
+                }
+                table_info['foreign_keys'].append(fk_info)
+            
+            # Get index information
+            for idx in inspector.get_indexes(table_name):
+                idx_info = {
+                    'name': idx['name'],
+                    'columns': idx['column_names'],
+                    'unique': idx['unique']
+                }
+                table_info['indexes'].append(idx_info)
+            
+            # Get constraint information
+            for const in inspector.get_unique_constraints(table_name):
+                const_info = {
+                    'name': const['name'],
+                    'columns': const['column_names']
+                }
+                table_info['constraints'].append(const_info)
+            
+            tables[table_name] = table_info
+        
+        return tables
+
     def get_complete_ddl(self) -> str:
-        ddl_parts = ["SET FOREIGN_KEY_CHECKS=0;\n"]
+        """Get complete DDL for the database."""
+        tables = self.get_all_tables_ddl()
+        ddl_parts = []
         
-        for table_name in self.inspector.get_table_names():
-            ddl_parts.append(self.get_table_ddl(table_name))
-            ddl_parts.append("\n")
+        for table_name, table_info in tables.items():
+            ddl_parts.append(f"-- Table: {table_name}")
+            ddl_parts.append("CREATE TABLE IF NOT EXISTS {} (".format(table_name))
             
-            indexes = self.get_indexes_ddl(table_name)
-            if indexes:
-                ddl_parts.extend(indexes)
-                ddl_parts.append("\n")
+            # Column definitions
+            column_defs = []
+            for col in table_info['columns']:
+                col_def = f"  {col['name']} {col['type']}"
+                if not col['nullable']:
+                    col_def += " NOT NULL"
+                if col['primary_key']:
+                    col_def += " PRIMARY KEY"
+                if col['autoincrement']:
+                    col_def += " AUTO_INCREMENT"
+                if col['default'] != 'None':
+                    col_def += f" DEFAULT {col['default']}"
+                column_defs.append(col_def)
             
-            foreign_keys = self.get_foreign_keys_ddl(table_name)
-            if foreign_keys:
-                ddl_parts.extend(foreign_keys)
-                ddl_parts.append("\n")
+            # Foreign key definitions
+            for fk in table_info['foreign_keys']:
+                fk_def = f"  FOREIGN KEY ({', '.join(fk['constrained_columns'])}) "
+                fk_def += f"REFERENCES {fk['referred_table']} ({', '.join(fk['referred_columns'])})"
+                column_defs.append(fk_def)
+            
+            ddl_parts.append(',\n'.join(column_defs))
+            ddl_parts.append(");")
+            ddl_parts.append("")  # Empty line for readability
         
-        ddl_parts.append("SET FOREIGN_KEY_CHECKS=1;\n")
         return "\n".join(ddl_parts) 

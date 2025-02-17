@@ -12,14 +12,21 @@ python-dotenv = "*"
 asyncpg = "*"
 aiomysql = "*"
 aiosqlite = "*"
-pymssql = "*"
 loguru = "*"
+textual = "*"
+pymysql = "*"
+cryptography = "*"
+pyperclip = "*"
 
 [dev-packages]
 pytest = "*"
 black = "*"
 mypy = "*"
 pylint = "*"
+textual-dev = "*"
 
 [requires]
-python_version = "3.12"
+python_version = "3.8"
+
+[scripts]
+ui = "PYTHONPATH=. python -m textual run --dev main.py --press-to-continue --console"
