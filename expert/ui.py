@@ -3,9 +3,10 @@ from gradio import ChatMessage
 from expert.tool.connection import DatabaseConnection
 from expert.ddl import DatabaseType
 from expert.ai.config import AIConfig
-from typing import Dict, List, Tuple, Optional, AsyncGenerator, TypedDict
+from typing import Dict, List, Tuple, Optional, AsyncGenerator, TypedDict, Union
 from expert.ai.protocol import AIMessageDict
 from expert.ai.default_sys_prompts import DEFAULT_USER_REVIEWER_PROMPT
+from expert.utils.logger import setup_logger, logger
 from dotenv import load_dotenv
 import traceback
 import json
@@ -13,6 +14,9 @@ import json
 
 # Load environment variables
 load_dotenv()
+
+# Setup logger
+setup_logger()
 
 # Initialize global instances
 DB = DatabaseConnection()
@@ -23,24 +27,22 @@ def init_default_models():
     """Initialize AI models with defaults from environment."""
     try:
         # Set expert to first available model
-        if AI_CONFIG.models:
-            provider, model = AI_CONFIG.models[0]
-            print(f"Initializing expert model: {provider}:{model}")
+        if AI_CONFIG.expert_models:
+            provider, model = AI_CONFIG.expert_models[0]
+            logger.info(f"Initializing expert model: {provider}:{model}")
             AI_CONFIG.create_ai(model_str=f"{provider}:{model}", role='expert')
             
+
         # Set reviewer to second available model, or first if only one exists
-        if len(AI_CONFIG.models) > 1:
-            provider, model = AI_CONFIG.models[1]
-            print(f"Initializing reviewer model: {provider}:{model}")
-            AI_CONFIG.create_ai(model_str=f"{provider}:{model}", role='reviewer')
-        elif AI_CONFIG.models:
-            provider, model = AI_CONFIG.models[0]
-            print(f"Initializing reviewer model: {provider}:{model}")
+        if AI_CONFIG.reviewer_models:
+            provider, model = AI_CONFIG.reviewer_models[0]
+            logger.info(f"Initializing reviewer model: {provider}:{model}")
             AI_CONFIG.create_ai(model_str=f"{provider}:{model}", role='reviewer')
             
         return True
     except Exception as e:
-        print(f"Error initializing default models: {str(e)}")
+        logger.error(f"Error initializing default models: {str(e)}")
+
         traceback.print_exc()
         return False
  
@@ -51,7 +53,7 @@ async def execute_sql(query: str) -> gr.Dataframe:
         return gr.Dataframe(value=[])
         
     try:
-        print(f"Executing SQL query: {query}")
+        logger.info(f"Executing SQL query: {query}")
         query_result, rows = await DB.async_executor.fetch_all(query)
         
         if rows:
@@ -61,103 +63,75 @@ async def execute_sql(query: str) -> gr.Dataframe:
         
         return gr.Dataframe(value=[])
     except Exception as e:
+        logger.error(f"SQL execution failed: {str(e)}")
         traceback.print_exc()
         return gr.Dataframe(value=[])
 
-async def ask_question(message: str, history: List[ChatMessage]) -> AsyncGenerator[List[ChatMessage], None]:
-    """Handle chat messages."""
-    if not AI_CONFIG.expert or not AI_CONFIG.reviewer:
-        history.append(ChatMessage(
-            role="assistant", content="Please select both Expert and Reviewer models first."
-        ))
-        yield history[-1:]
-        
+async def ask_question(message: str, history: List[ChatMessage]) -> AsyncGenerator[List[Tuple[ChatMessage,str]], None]:
+    """
+    Handle chat messages and yield only the latest chat response, not the entire conversation history.
+    
+    Note: Gradio's ChatInterface may supply the history as dictionaries rather than ChatMessage objects.
+    """
+    # Early exit if AI models are not set up.
+    while not AI_CONFIG.expert or not AI_CONFIG.reviewer:
+        yield ChatMessage(role="assistant", content="Please select both Expert and Reviewer models first."), ""
+
     try:
-        # Convert history to tuples for AI protocol
+        # Helper function to extract role and content regardless of the message type.
+        def get_role_content(msg: Union[Dict[str, str], ChatMessage]) -> Tuple[str, str]:
+            """
+            Args:
+                msg: A dictionary with 'role' and 'content' keys or a ChatMessage object.
+            Returns:
+                A tuple: (role, content)
+            """
+            if isinstance(msg, dict):
+                return msg["role"], msg["content"]
+            return msg.role, msg.content
+
+        # Convert chat history to the format expected by the AI expert (i.e. AIMessageDict).
         ai_history = [
-            AIMessageDict(role=msg.role, content=msg.content)
-            for msg in history if msg.role in ["user", "assistant"]
+            AIMessageDict(role=get_role_content(msg)[0], content=get_role_content(msg)[1])
+            for msg in history if get_role_content(msg)[0] in ["user", "assistant"]
         ]
-        
-        # Stream expert response
+
         expert_chunks = []
+        last_yielded = ""
+        # Stream expert response chunks.
         async for chunk in AI_CONFIG.expert.stream(message, ai_history):
             expert_chunks.append(chunk)
-            # Update chat with partial response
-            history.append(ChatMessage(
-                role="assistant",
-                content=f"""Expert's response:\n{''.join(expert_chunks)}"""
-            ))
-            yield history[-1:]
+            complete_response = ''.join(expert_chunks)
+            # Only yield (as the sole new message) when the complete_response ends with punctuation
+            # (signaling a likely natural break).
+            if complete_response != last_yielded:
+                if any(complete_response.endswith(end) for end in ['.', '!', '?', ':', '\n']):
+                    last_yielded = complete_response
+                    chat_msg = ChatMessage(role="assistant", content=complete_response)
+                    history.append(chat_msg)
+                    yield chat_msg, ""
         
-        expert_message = ''.join(expert_chunks)
-        # Extract SQL query if present
-        sql_query = AIConfig.extract_sql_query(expert_message)
-        if sql_query:
-            #
-            # Reviewer will review the SQL query
-            #
-            yield ChatMessage(
-                role="assistant",
-                content=f"Review the following SQL query:\n{sql_query}"
-            )
-            message = DEFAULT_USER_REVIEWER_PROMPT.format(sql_query=sql_query)
-            response = await AI_CONFIG.reviewer.ask(message=message, history=[])
-            try:
-                response_json = json.loads(response.message)
-            except Exception as e:
-                response_json = {
-                    "is_correct": False,
-                    "is_dangerous": True,
-                    "feedback": f"Error parsing JSON: {str(e)}"
-                }
-            if response_json["is_correct"]:
-                yield ChatMessage(
-                    role="assistant",
-                    content=f"Reviewer has approved the SQL query.\n{sql_query}"
-                )
-            else:
-                yield ChatMessage(
-                    role="assistant",
-                    content=f"Reviewer has rejected the SQL query.\n{sql_query}. Reason: {response_json['feedback']}"
-                )
 
 
+        # Ensure that the final expert response is yielded if not already done.
+        complete_response = ''.join(expert_chunks)
+        if complete_response != last_yielded:
+
+            chat_msg = ChatMessage(role="assistant", content=complete_response)
+            history.append(chat_msg)
+            print("--- yeld --- ")
+            yield chat_msg, ""
 
 
-
-
-        # Get reviewer response
-        reviewer_chunks = []
-        async for chunk in AI_CONFIG.reviewer.stream(
-            f"Review this response for accuracy and completeness:\n{expert_message}",
-            [AIMessageDict(role="user", content=expert_message)]  # Pass expert response as context
-        ):
-            reviewer_chunks.append(chunk)
-            # Update chat with expert response and partial reviewer response
-            history.append(ChatMessage(
-                role="assistant",
-                content=f"""Expert's response:\n{expert_message}\n\nReviewer's comment:\n{''.join(reviewer_chunks)}"""
-            ))
-            yield history[-1:]
-        
-        # Final response with complete expert and reviewer responses
-        history.append(ChatMessage(
-            role="assistant",
-            content=f"""Expert's response:\n{expert_message}\n\nReviewer's comment:\n{''.join(reviewer_chunks)}"""
-        ))
-        yield history[-1:]
-        
     except Exception as e:
-        history.append(ChatMessage(
-            role="assistant",
-            content=f"Error: {str(e)}"
-        ))
-        yield history[-1:]
+        logger.error(f"Error in ask_question: {str(e)}")
+        traceback.print_exc()
+        yield ChatMessage(role="assistant", content=f"Error: {str(e)}"), ""
+
 
 def connect(database: str, url: str, port: str, default_db: str, user: str, password: str) -> Tuple[str, str]:
     """Handle database connection."""
-    print(f"Connecting to {database} at {url}:{port} default db [{default_db}] with user [{user}]")
+    logger.info(f"Connecting to {database} at {url}:{port} default db [{default_db}] with user [{user}]")
     
     try:
         if DB.is_connected:
@@ -208,7 +182,7 @@ def connect(database: str, url: str, port: str, default_db: str, user: str, pass
 
 def update_database_options(database: str) -> Tuple[str, int]:
     """Update database-specific options."""
-    print(f"Updating database options for {database}")
+    logger.debug(f"Updating database options for {database}")
     match database:
         case "MySQL":
             return "MySQL", 3306
@@ -229,9 +203,9 @@ def on_model_change(
 ) -> str:
     """Handle model selection change."""
     try:
-        print(f"Setting up {role} model: {model}")
-        print(f"Expert prompt: {expert_prompt}")
-        print(f"Reviewer prompt: {reviewer_prompt}")
+        logger.info(f"Setting up {role} model: {model}")
+        logger.debug(f"Expert prompt: {expert_prompt}")
+        logger.debug(f"Reviewer prompt: {reviewer_prompt}")
         
         prompt = expert_prompt if role == 'expert' else reviewer_prompt
         AI_CONFIG.create_ai(model, role, system_prompt=prompt)
@@ -242,8 +216,8 @@ def on_model_change(
                 AI_CONFIG.reviewer.init(DB.get_ddl())
         return f"Selected {role} model: {model}"
     except Exception as e:
+        logger.error(f"Error setting up model: {str(e)}")
         traceback.print_exc()
-        print(f"Error setting up model: {str(e)}")
         return f"Error setting up model: {str(e)}"
 
 # Create Gradio interface
@@ -279,6 +253,21 @@ with gr.Blocks() as demo:
                     placeholder="Leave empty for default prompt",
                     lines=4
                 )
+            with gr.Blocks() as chatbot:
+                chat_bot = gr.Chatbot(
+                    height=300,
+                    type="messages",
+                    show_label=False,
+                    render_markdown=True,
+                    bubble_full_width=False
+                )
+                msg = gr.Textbox(
+                    placeholder="Ask me about the database...",
+                    container=False
+                )
+                clear = gr.Button("Clear")
+
+
             chat = gr.ChatInterface(
                 ask_question,
                 type="messages",
@@ -295,7 +284,7 @@ with gr.Blocks() as demo:
                 ),
                 autofocus=False,
                 concurrency_limit=None,  # Allow multiple concurrent chats
-                # additional_outputs=[sql_input],  # Pass SQL to input box
+                additional_outputs=[sql_input],  # Pass SQL to input box
                 api_name="ask_question"  # Enable async
             )
 
@@ -316,18 +305,20 @@ with gr.Blocks() as demo:
 
             with gr.Accordion("Models", open=True):
                 expert_model = gr.Dropdown(
-                    choices=AI_CONFIG.get_model_choices(),
+                    choices=AI_CONFIG.get_expert_model_choices(),
                     label="Expert Model",
-                    value=f"{AI_CONFIG.models[0][0]}:{AI_CONFIG.models[0][1]}" if AI_CONFIG.models else None
+                    value=f"{AI_CONFIG.expert_models[0][0]}:{AI_CONFIG.expert_models[0][1]}" if AI_CONFIG.expert_models else None
                 )
+
                 reviewer_model = gr.Dropdown(
-                    choices=AI_CONFIG.get_model_choices(),
+                    choices=AI_CONFIG.get_reviewer_model_choices(),
                     label="Reviewer Model",
-                    value=(f"{AI_CONFIG.models[1][0]}:{AI_CONFIG.models[1][1]}" if len(AI_CONFIG.models) > 1 
-                          else f"{AI_CONFIG.models[0][0]}:{AI_CONFIG.models[0][1]}" if AI_CONFIG.models else None)
+                    value=(f"{AI_CONFIG.reviewer_models[0][0]}:{AI_CONFIG.reviewer_models[0][1]}" if len(AI_CONFIG.reviewer_models) > 1 
+                           else f"{AI_CONFIG.reviewer_models[0][0]}:{AI_CONFIG.reviewer_models[0][1]}" if AI_CONFIG.reviewer_models else None)
                 )
             with gr.Accordion("DB Info", open=False):
                 output = gr.Textbox(label="Output")
+
             
             results_df = gr.Dataframe(
                 label="Query Results",

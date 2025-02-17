@@ -31,16 +31,19 @@ class AIExpertProtocol(Protocol):
     async def ask(
         self,
         message: str,
-        history: List[AIMessageDict]
+        history: List[AIMessageDict],
+        response_format_json: bool = False
     ) -> AIResponse:
         """Ask AI expert a question."""
         pass
+
 
     @abstractmethod
     async def stream(
         self,
         message: str,
-        history: List[AIMessageDict]
+        history: List[AIMessageDict],
+        response_format_json: bool = False
     ) -> AsyncGenerator[str, None]:
         """Stream AI expert's response."""
         pass 

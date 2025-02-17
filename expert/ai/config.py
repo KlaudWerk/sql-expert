@@ -13,9 +13,12 @@ class AIConfig:
         self.anthropic_api_key = os.getenv('ANTHROPIC_API_KEY', '')
         
         # Parse models configuration from environment
-        models_str = os.getenv('AI_MODELS', 'OpenAI:gpt-4o,Anthropic:claude-3.5-sonnet')
-        self.models = self._parse_models(models_str)
-        
+        models_str = os.getenv('AI_MODELS_EXPERT', 'OpenAI:gpt-4o,Anthropic:claude-3.5-sonnet')
+        self.expert_models = self._parse_models(models_str)
+        models_str = os.getenv('AI_MODELS_REVIEWER', 'OpenAI:gpt-4o,Anthropic:claude-3.5-sonnet')
+        self.reviewer_models = self._parse_models(models_str)
+
+
         # Initialize experts
         self.expert: Optional[AIExpertProtocol] = None
         self.reviewer: Optional[AIExpertProtocol] = None
@@ -29,10 +32,15 @@ class AIConfig:
                 models.append((provider.strip(), model.strip()))
         return models
     
-    def get_model_choices(self) -> List[str]:
+    def get_expert_model_choices(self) -> List[str]:
         """Get formatted model choices for UI."""
-        return [f"{provider}:{model}" for provider, model in self.models]
+        return [f"{provider}:{model}" for provider, model in self.expert_models]
     
+    def get_reviewer_model_choices(self) -> List[str]:
+        """Get formatted model choices for UI."""
+        return [f"{provider}:{model}" for provider, model in self.reviewer_models]
+
+
     def create_ai(
         self,
         model_str: str,

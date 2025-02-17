@@ -2,6 +2,7 @@ from typing import Optional, List, Tuple, Dict, AsyncIterator, AsyncGenerator
 from .protocol import AIResponse, AIExpertProtocol, AIMessageDict
 import traceback
 from anthropic import AsyncAnthropic
+from loguru import logger
 
 class AnthropicExpert(AIExpertProtocol):
     """Anthropic-based expert implementation."""
@@ -23,10 +24,12 @@ class AnthropicExpert(AIExpertProtocol):
     async def stream(
         self,
         message: str,
-        history: List[AIMessageDict]
+        history: List[AIMessageDict],
+        response_format_json: bool = False
     ) -> AsyncGenerator[str, None]:
         """Stream AI expert's response."""
         if not self.ddl:
+
             yield "I haven't been initialized with database structure yet."
             return
 
@@ -42,22 +45,24 @@ class AnthropicExpert(AIExpertProtocol):
                 max_tokens=2048,
                 system=f"{self.system_prompt}\nDatabase DDL:\n{self.ddl}",
                 messages=messages,
-                stream=True
+                stream=True,
             )
             
+
             async for chunk in stream:
                 if chunk.content:
                     yield chunk.content[0].text
                     
         except Exception as e:
             traceback.print_exc()
-            print(f"Streaming error: {str(e)}")
+            logger.error(f"Anthropic streaming error: {str(e)}")
             yield f"\nError during streaming: {str(e)}"
     
     async def ask(
         self,
         message: str,
-        history: List[AIMessageDict]
+        history: List[AIMessageDict],
+        response_format_json: bool = False
     ) -> AIResponse:
         if not self.ddl:
             return AIResponse(
@@ -82,7 +87,7 @@ class AnthropicExpert(AIExpertProtocol):
 
         except Exception as e:
             traceback.print_exc()
-            print(f"Error: {str(e)}")
+            logger.error(f"Anthropic ask error: {str(e)}")
             return AIResponse(
                 message="Sorry, I encountered an error.",
                 error=str(e)

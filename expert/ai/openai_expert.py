@@ -4,6 +4,7 @@ import traceback
 import asyncio
 from openai.types.chat import ChatCompletionChunk
 from openai import AsyncOpenAI
+from loguru import logger
 
 class OpenAIExpert(AIExpertProtocol):
     """OpenAI-based expert implementation."""
@@ -26,7 +27,8 @@ class OpenAIExpert(AIExpertProtocol):
     async def stream(
         self,
         message: str,
-        history: List[AIMessageDict]
+        history: List[AIMessageDict],
+        response_format_json: bool = False
     ) -> AsyncGenerator[str, None]:
         """Stream AI expert's response."""
         if not self.ddl:
@@ -47,33 +49,37 @@ class OpenAIExpert(AIExpertProtocol):
             stream = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                stream=True
+                stream=True,
+                response_format={"type": "json_object"} if response_format_json else None
             )
             
+
             async for chunk in stream:
                 if chunk.choices[0].delta.content is not None:
                     yield chunk.choices[0].delta.content
                     
         except Exception as e:
             traceback.print_exc()
-            print(f"Streaming error: {str(e)}")
+            logger.error(f"OpenAI streaming error: {str(e)}")
             yield f"\nError during streaming: {str(e)}"
     
     async def ask(
         self,
         message: str,
-        history: List[AIMessageDict]
+        history: List[AIMessageDict],
+        response_format_json: bool = False
     ) -> AIResponse:
         try:
             full_response = ""
-            async for chunk in self.stream(message, history):
+
+            async for chunk in self.stream(message, history, response_format_json):
                 full_response += chunk
                 
             return AIResponse(message=full_response)
             
         except Exception as e:
             traceback.print_exc()
-            print(f"Error: {str(e)}")
+            logger.error(f"OpenAI ask error: {str(e)}")
             return AIResponse(
                 message="Sorry, I encountered an error.",
                 error=str(e)
