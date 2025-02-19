@@ -2,6 +2,7 @@
 CUSTOM_CSS = """
 TabbedContent {
     height: 1fr;
+    margin: 0;
 }
 
 Tabs {
@@ -12,25 +13,29 @@ Tabs {
 }
 
 Tab {
-    padding: 1 2;
-    margin: 0 1;
-    background: $surface;
+    width: 25;
+    height: 3;
     color: $text;
+    background: $surface;
+    margin: 0 1;
+    content-align: center middle;
+    text-align: center;
+    padding: 0 1;
 }
 
 Tab:hover {
     background: $primary;
-    color: $text;
+    color: white;
 }
 
 Tab.-active {
     background: $accent;
-    color: $text;
-    text-style: bold;
+    color: white;
 }
 
 TabPane {
     padding: 1;
+    color: $text;
 }
 
 .tab-section-title {
@@ -189,5 +194,40 @@ Checkbox {
 .log-buttons Button:hover {
     background: $primary;
     color: $text;
+}
+
+#content-container {
+    height: 100%;
+    padding: 1;
+}
+
+#input-container {
+    width: 100%;
+    height: auto;
+    padding: 1;
+    background: $surface;
+    border-top: solid $primary;
+    align-vertical: bottom;
+}
+
+#expert-log {
+    width: 100%;
+    height: 1fr;
+    border: solid $primary;
+    background: $surface;
+    margin: 1;
+    padding: 1;
+}
+
+#message-input {
+    width: 1fr;
+    margin: 1;
+    height: 5;
+}
+
+#send-button {
+    width: 10;
+    margin: 1;
+    align: right middle;
 }
 """ 

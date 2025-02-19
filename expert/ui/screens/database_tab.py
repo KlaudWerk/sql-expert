@@ -1,6 +1,6 @@
 """Database tab implementation."""
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Static, RichLog, Button
+from textual.widgets import Static, RichLog, Button, Tree
 from textual import on
 from expert.tool.connection import DatabaseConnection
 import traceback
@@ -190,7 +190,7 @@ class DatabaseTab(Container):
                             )
                             
                             fk_table.add_column("Local Column", style="green")
-                            fk_table.add_column("→", style="green")
+                            fk_table.add_column="→"
                             fk_table.add_column("Referenced Table.Column", style="green")
                             fk_table.add_column("Options", style="green dim")
                             
@@ -215,8 +215,15 @@ class DatabaseTab(Container):
             # Log error
             ex = traceback.format_exc()
             log.write(Text("Error connecting to database:", style="red bold"))
+            log.write(Text(f"Error: {e}", style="red"))
             log.write("")  # Empty line for readability
-            log.write(Text(ex, style="red"))
+            
+            # Create collapsible traceback
+            tree = Tree("Traceback (click to expand)")
+            tree.root.expand()
+            for line in ex.splitlines():
+                tree.root.add(Text(line, style="red"))
+            log.write(tree)
 
     async def action_connect_save_database(self, params: dict) -> None:
         """Action to handle database connection and save."""
